@@ -3356,6 +3356,20 @@ function onNetConnected() {
   }
   startOnlineDraft();
   ONLINE.draftStarted = true;
+  startStateSync();
+}
+/* 周期性同步「我的开局准备状态」，任何一条消息丢失都能自愈 */
+function startStateSync() {
+  if (ONLINE._syncTimer) clearInterval(ONLINE._syncTimer);
+  ONLINE._syncTimer = setInterval(() => {
+    if (G.mode !== 'online' || !NET.connected) { clearInterval(ONLINE._syncTimer); ONLINE._syncTimer = null; return; }
+    if (G.screen === 'battle' && G.phase !== 'pick') return; // 已开打就不用再发
+    const me = G.players[G.myIndex];
+    netSend({
+      type: 'state', mode: G.battleMode, pick: ONLINE.myPick, team: ONLINE.myTeam,
+      starter: ONLINE.myStarter, sealed: (me && me.sealed) || [], sealedDone: !!(me && me.sealedDone),
+    });
+  }, 1500);
 }
 function onNetDisconnect() {
   if (G.mode !== 'online') return;
@@ -3395,6 +3409,17 @@ function onNetData(d) {
     } else if (ONLINE.myTeam) {
       netSend({ type: 'team', team: ONLINE.myTeam, role: NET.role });
     }
+  } else if (msg.type === 'state') {
+    // 开局准备阶段的状态兜底同步：缺什么补什么
+    if (!G.battleMode && msg.mode) G.battleMode = msg.mode;
+    if (msg.pick && !ONLINE.theirPick) ONLINE.theirPick = msg.pick;
+    if (msg.team && !ONLINE.theirTeam) ONLINE.theirTeam = msg.team;
+    if (msg.starter && !ONLINE.theirStarter) ONLINE.theirStarter = msg.starter;
+    if (msg.sealedDone && G._awakenNext) {
+      applySeal(1 - G.myIndex, msg.sealed || []);
+      const n = G._awakenNext; G._awakenNext = null; n();
+    }
+    if (G.screen !== 'battle') maybeStartOnlineBattle();
   } else if (msg.type === 'mode') {
     G.battleMode = msg.m;
     netLog('收到对战模式：' + (MODE_NAME[msg.m] || msg.m));
@@ -3676,6 +3701,17 @@ function onlineBeginTurn() {
 function onlineConfirm() {
   if (G.phase !== 'choose' || !G.draft || G.awaitingFirst) return;
   if (G.draft.kind === 'skill' && skillOf(G.draft).name === '陷阱' && !G.draft.guess) return;
+  // 未来打击/未来防护：必须先由玩家选择生效回合（1~5），联网也一样
+  if (G.draft.kind === 'skill' && ['未来打击', '未来防护'].includes(skillOf(G.draft).name) && !G.draft.futureTurns) {
+    openFutureModal(skillOf(G.draft).name, (t) => { G.draft.futureTurns = t; onlineConfirm(); });
+    return;
+  }
+  // 致命陷阱：必须先由玩家点选锁定技能
+  if (G.draft.kind === 'skill' && skillOf(G.draft).name === '致命陷阱' && !G.draft.trapSkills) {
+    const p0 = G.players[G.myIndex], e0 = G.players[1 - G.myIndex];
+    openTrapModal(p0, e0, (picks) => { G.draft.trapSkills = picks; onlineConfirm(); });
+    return;
+  }
   const p = G.players[G.myIndex];
   const sel = G.draft;
   stopTurnTimer();
@@ -3691,7 +3727,7 @@ function onlineConfirm() {
   if (el.prophetHint) el.prophetHint.classList.remove('show');
   const pi = prophetIdx();
   el.turnPrompt.textContent = (pi >= 0 && pi !== G.myIndex) ? '等待先知选择行动…' : '等待对方…';
-  netSend({ type: 'action', round: G.round, sel: { kind: sel.kind, prof: sel.prof, skillIndex: sel.skillIndex, guess: sel.guess, stolen: sel.stolen } });
+  netSend({ type: 'action', round: G.round, sel: { kind: sel.kind, prof: sel.prof, skillIndex: sel.skillIndex, guess: sel.guess, stolen: sel.stolen, futureTurns: sel.futureTurns, trapSkills: sel.trapSkills } });
   netLog('已提交行动，等待对方…');
   maybeOnlineResolve();
 }
@@ -4181,8 +4217,9 @@ function awakenFor(i, next) {
     const req = () => { if (G._awakenNext) netSend({ type: 'awaken-req' }); };
     setTimeout(req, 2000);
     setTimeout(req, 5000);
-    setTimeout(req, 8000);
-    setTimeout(() => { if (G._awakenNext) { G._awakenNext = null; addLog('对方封印信息超时，按无封印继续'); next(); } }, 13000);
+    setTimeout(req, 9000);
+    // 不设超时：封印是开局准备阶段，必须等对方真正封完，回合不开始
+    const poll = setInterval(() => { if (G._awakenNext) req(); else clearInterval(poll); }, 2500);
     return;
   }
   openSealModal(p, (sealed) => {
