@@ -3256,11 +3256,19 @@ function mqttOnMessage(t, payload) {
     }
     return;
   }
-  if (msg.type === 'ack') { if (NET.role === 'guest' && !NET.connected) onNetConnected(); return; }
+  if (msg.type === 'ack') { if (NET.role === 'guest' && !NET.connected) { netLog('收到房主回应，握手成功'); onNetConnected(); } return; }
   onNetData(payload.toString());
+}
+/* 开始新的联机前，彻底清掉上一次连接的残留状态 */
+function resetNetState() {
+  NET.connected = false;
+  NET.tries = 0;
+  try { if (MFX.client) MFX.client.end(true); } catch (e) {}
+  MFX.client = null; MFX.ready = false;
 }
 function netHost() {
   loadNetLib(() => {
+    resetNetState();
     NET.code = randCode(5);
     NET.role = 'host';
     MFX.selfId = mqttSelfId();
@@ -3279,6 +3287,7 @@ function netHost() {
 function netJoin(code) {
   if (!code) { setOnlineStatus('请输入房间码'); return; }
   loadNetLib(() => {
+    resetNetState();
     NET.code = String(code).toUpperCase();
     NET.role = 'guest';
     MFX.selfId = mqttSelfId();
@@ -3335,10 +3344,14 @@ function onNetConnected() {
   G.myIndex = NET.role === 'host' ? 0 : 1;
   ONLINE.draftStarted = false;
   if (NET.role === 'host' && G.battleMode) netSend({ type: 'mode', m: G.battleMode });
-  // 加入方必须等收到房主的模式后再开始，否则会按错误模式进入选人
+  // 加入方必须等收到房主的模式后再开始；期间主动索要，直到拿到为止
   if (NET.role === 'guest' && !G.battleMode) {
-    setOnlineStatus('已连接，等待房主选择模式…');
+    setOnlineStatus('已连接，等待房主同步模式…');
     netLog('等待房主同步对战模式…');
+    const ask = setInterval(() => {
+      if (G.battleMode || !NET.connected) { clearInterval(ask); return; }
+      netSend({ type: 'need-mode' });
+    }, 1500);
     return;
   }
   startOnlineDraft();
@@ -3372,8 +3385,19 @@ function onNetData(d) {
     // 对方没收到我的封印信息，且我已真正完成封印，才重发
     const me = G.players[G.myIndex];
     if (me && me.sealedDone) netSend({ type: 'awaken', who: G.myIndex, sealed: me.sealed || [], done: true });
+  } else if (msg.type === 'need-mode') {
+    // 加入方还没拿到模式，房主补发
+    if (NET.role === 'host' && G.battleMode) netSend({ type: 'mode', m: G.battleMode });
+  } else if (msg.type === 'need-teams') {
+    // 对方缺队伍信息：房主补发随机队伍；自选模式则各自补发自己的队伍
+    if (NET.role === 'host' && G.battleMode === 'random4' && ONLINE.myTeam && ONLINE.theirTeam) {
+      netSend({ type: 'teams', host: ONLINE.myTeam, guest: ONLINE.theirTeam });
+    } else if (ONLINE.myTeam) {
+      netSend({ type: 'team', team: ONLINE.myTeam, role: NET.role });
+    }
   } else if (msg.type === 'mode') {
     G.battleMode = msg.m;
+    netLog('收到对战模式：' + (MODE_NAME[msg.m] || msg.m));
     if (NET.role === 'guest') {
       if (G.screen === 'online') setOnlineStatus('房主选择了：' + MODE_NAME[msg.m]);
       if (NET.connected && !ONLINE.draftStarted) { ONLINE.draftStarted = true; startOnlineDraft(); }
@@ -3390,6 +3414,9 @@ function onNetData(d) {
     swapIn(di, msg.prof, msg.buffs);
   } else if (msg.type === 'action') {
     const sel = msg.sel;
+    // 只接受「当前回合」的行动，避免动画快慢导致跨回合错位
+    if (typeof msg.round === 'number' && msg.round !== G.round) { netLog('忽略过期行动（第 ' + msg.round + ' 回合）'); return; }
+    netLog('收到对方行动');
     const other = G.players[1 - G.myIndex];
     if (sel.kind === 'skill' && !sel.prof) sel.prof = other.prof;
     const pi = prophetIdx();
@@ -3420,6 +3447,7 @@ function onNetData(d) {
 }
 
 function startOnlineDraft() {
+  if (ONLINE._teamAsk) { clearInterval(ONLINE._teamAsk); ONLINE._teamAsk = null; }
   ONLINE.myPick = null; ONLINE.theirPick = null;
   ONLINE.myTeam = null; ONLINE.theirTeam = null;
   ONLINE.myStarter = null; ONLINE.theirStarter = null;
@@ -3427,9 +3455,6 @@ function startOnlineDraft() {
   G.players = [];
   G.bench = null;
   const relay = G.battleMode === 'pick4' || G.battleMode === 'random4';
-  if (relay) {
-    // 房间消息日志由服务端持久化，缺数据时会由轮询补齐，无需重发
-  }
   if (!relay) {
     if (G.battleMode === 'pick1') { onlineGrid(1); return; }
     // 随机单挑：双方各自抽自己的 3 个（不同组）
@@ -3452,6 +3477,13 @@ function startOnlineDraft() {
     } else if (!ONLINE.theirTeam) {
       setOnlineStatus('等待房主分配随机队伍…');
       showScreen('online');
+      // 主动索要队伍，直到拿到（避免早期消息被重置掉）
+      if (!ONLINE._teamAsk) {
+        ONLINE._teamAsk = setInterval(() => {
+          if (ONLINE.theirTeam || !NET.connected) { clearInterval(ONLINE._teamAsk); ONLINE._teamAsk = null; return; }
+          netSend({ type: 'need-teams' });
+        }, 1200);
+      }
       return;
     }
     setOnlineStatus('已随机队伍，等待对方…');
@@ -3464,7 +3496,17 @@ function startOnlineDraft() {
 function maybeStartOnlineBattle() {
   const relay = G.battleMode === 'pick4' || G.battleMode === 'random4';
   if (relay) {
-    if (!ONLINE.myTeam || !ONLINE.theirTeam) { setOnlineStatus('等待双方队伍就绪…'); return; }
+    if (!ONLINE.myTeam || !ONLINE.theirTeam) {
+      setOnlineStatus('等待双方队伍就绪…');
+      // 主动索要队伍，直到双方都齐
+      if (!ONLINE._teamAsk) {
+        ONLINE._teamAsk = setInterval(() => {
+          if ((ONLINE.myTeam && ONLINE.theirTeam) || !NET.connected) { clearInterval(ONLINE._teamAsk); ONLINE._teamAsk = null; return; }
+          netSend({ type: 'need-teams' });
+        }, 1200);
+      }
+      return;
+    }
     if (!ONLINE.myStarter) {
       const myTeam = ONLINE.myTeam; // 各自从自己的队伍里选首发
       openStarterModal(myTeam, (s) => { ONLINE.myStarter = s; netSend({ type: 'starter', prof: s }); maybeStartOnlineBattle(); });
@@ -3649,13 +3691,16 @@ function onlineConfirm() {
   if (el.prophetHint) el.prophetHint.classList.remove('show');
   const pi = prophetIdx();
   el.turnPrompt.textContent = (pi >= 0 && pi !== G.myIndex) ? '等待先知选择行动…' : '等待对方…';
-  netSend({ type: 'action', sel: { kind: sel.kind, prof: sel.prof, skillIndex: sel.skillIndex, guess: sel.guess, stolen: sel.stolen } });
+  netSend({ type: 'action', round: G.round, sel: { kind: sel.kind, prof: sel.prof, skillIndex: sel.skillIndex, guess: sel.guess, stolen: sel.stolen } });
+  netLog('已提交行动，等待对方…');
   maybeOnlineResolve();
 }
 function maybeOnlineResolve() {
+  if (G.phase !== 'choose') return; // 防止重复触发（自己确认 + 收到对方行动会各调一次）
   if (G.pending[0] && G.pending[1]) {
     G.phase = 'resolve';
     el.turnPrompt.textContent = '结算中…';
+    netLog('双方行动齐了，开始结算第 ' + G.round + ' 回合');
     playAndResolve();
   }
 }
