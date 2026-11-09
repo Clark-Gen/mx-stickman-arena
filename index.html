@@ -1472,6 +1472,7 @@ function dealDamage(p, amt, ev, who, src, trueDmg) {
     else { p.hp = Math.min(p.hp, p.maxHp); }
     ev.push({ t: 'damage', who, amt, src, true: trueDmg });
     p.lastSrc = src;
+    if (p.hp <= 0) checkDeath(p, who); // 多段伤害：每段结算完立即处理复活/不屈
     return;
   }
   // 虫群优先承伤
@@ -1529,19 +1530,22 @@ function dealDamage(p, amt, ev, who, src, trueDmg) {
     p.lastSrc = src;
     const atk = G.players && G.players[1 - who];
     if (atk && atk.stats) { atk.stats.dmgBySkill = atk.stats.dmgBySkill || {}; atk.stats.dmgBySkill[src] = (atk.stats.dmgBySkill[src] || 0) + remaining; if (remaining > atk.stats.maxDmg) { atk.stats.maxDmg = remaining; atk.stats.maxSrc = src; } }
+    if (p.hp <= 0) checkDeath(p, who); // 多段伤害：每段结算完立即处理复活/不屈
   }
 }
 function directDamage(p, amt, ev, who, src, self) {
   if (isInv(p)) { ev.push({ t: 'immune', who }); return; }
   // self=true 表示自身状态结算（中毒/灼伤/流血/焦土），不受幽魂无敌单位拦截
   if (!self && isGhostUntargetable(p)) { ev.push({ t: 'immune', who }); return; }
-  amt = applyCharm(amt, p);  if ((p.prof === 'treant' || p.treantTrait) && amt > 0) {
+  amt = applyCharm(amt, p);
+  if ((p.prof === 'treant' || p.treantTrait) && amt > 0) {
     p.maxHp = p.maxHp - amt;
     if (p.maxHp <= 0) { p.maxHp = 0; p.hp = 0; }
     else if (p.prof === 'treant') { p.hp = p.maxHp; }
     else { p.hp = Math.min(p.hp, p.maxHp); }
     ev.push({ t: 'damage', who, amt, src });
     p.lastSrc = src;
+    if (p.hp <= 0) checkDeath(p, who);
     return;
   }
   p.hp = Math.max(0, p.hp - amt);
@@ -1551,6 +1555,7 @@ function directDamage(p, amt, ev, who, src, self) {
   if (src === '流血' && p.servant && p.servantOf != null && G.players[p.servantOf]) {
     heal(G.players[p.servantOf], amt, ev, p.servantOf);
   }
+  if (p.hp <= 0) checkDeath(p, who); // 多段真伤：每段结算完立即处理复活/不屈
 }
 function selfDamage(p, amt, ev, who, src) {
   if (isInv(p) || p.rage) return; // 无敌 或 狂暴：自残不扣血
@@ -1844,7 +1849,7 @@ function resolveSkill(p, sel, s, enemy, enemySel, enemyEffS, ev, who) {
       else if (s.name === '合纵连横') { /* 在 resolveTurn 处理 */ }
       else if (s.name === '草船借箭') { /* 在 resolveTurn 处理 */ }
       else if (s.name === '舌战群儒') { p.invincible = Math.max(p.invincible, 3); addStatus(ev, who, 'invincible', 3); }
-      else if (s.name === '唇枪舌剑') { const times = Math.floor((p.specialHit || 0) / 5); for (let i = 0; i < times; i++) { if (enemy.resist > 0) { enemy.resist--; ev.push({ t: 'resist', who: e }); continue; } dealDamage(enemy, 5, ev, e, '唇枪舌剑'); const avail = ['resist', 'prayer', 'revive', 'indomitable', 'serenity', 'brew', 'awaken', 'overdraft'].filter(k => (enemy[k] || 0) > 0); if (avail.length) { const k = avail[Math.floor(Math.random() * avail.length)]; enemy[k] = 0; ev.push({ t: 'text', msg: `唇枪舌剑：消除对方「${STATUS[k] ? STATUS[k].label : k}」` }); } } }
+      else if (s.name === '唇枪舌剑') { const times = Math.floor((p.specialHit || 0) / 5); for (let i = 0; i < times; i++) { if (enemy.hp <= 0) break; if (enemy.resist > 0) { enemy.resist--; ev.push({ t: 'resist', who: e }); continue; } dealDamage(enemy, 5, ev, e, '唇枪舌剑'); const avail = ['resist', 'prayer', 'revive', 'indomitable', 'serenity', 'brew', 'awaken', 'overdraft'].filter(k => (enemy[k] || 0) > 0); if (avail.length) { const k = avail[Math.floor(Math.random() * avail.length)]; enemy[k] = 0; ev.push({ t: 'text', msg: `唇枪舌剑：消除对方「${STATUS[k] ? STATUS[k].label : k}」` }); } } }
       break;
 
     case 'vampire': {
@@ -1870,7 +1875,7 @@ function resolveSkill(p, sel, s, enemy, enemySel, enemyEffS, ev, who) {
       if (s.name === '扎根') { if (p.giant) { ev.push({ t: 'text', msg: '巨树形态下无法使用扎根' }); } else if (p.rooted) { p.rooted = false; ev.push({ t: 'text', msg: '取消扎根' }); } else { p.rooted = true; addStatus(ev, who, 'rooted', 1); } }
       else if (s.name === '自然复苏') { p.maxHp += 4; p.peakMaxHp = Math.max(p.peakMaxHp || 0, p.maxHp); p.hp = p.maxHp; ev.push({ t: 'text', msg: '生命上限 +4' }); }
       else if (s.name === '厚重树皮') gainResist(p, 2, ev, who);
-      else if (s.name === '巨树重击') { const times = Math.floor(p.maxHp / 5); for (let i = 0; i < times; i++) dealDamage(enemy, 2, ev, e, '巨树重击'); }
+      else if (s.name === '巨树重击') { const times = Math.floor(p.maxHp / 5); for (let i = 0; i < times; i++) { dealDamage(enemy, 2, ev, e, '巨树重击'); if (enemy.hp <= 0) break; } }
       else if (s.name === '参天巨树') { p.giant = true; p.rooted = false; addStatus(ev, who, 'giant', 1); p.revive += 1; addStatus(ev, who, 'revive', 1); }
       break;
 
@@ -1947,7 +1952,12 @@ function resolveTurn(a, b, sa, sb) {
             else if (!isDefend(fsel)) {
               if (strikeSuppresses) { fsel.nullified = true; ev.push({ t: 'suppress' }); }
               const fm = (pl.futureMark || 0);
-              for (let k = 0; k < 1 + fm; k++) { directDamage(foe, d.amt, ev, 1 - idx, '未来打击'); if (foe.hp <= 0) break; }
+              for (let k = 0; k < 1 + fm; k++) {
+                // 多段伤害：每段先消耗 1 层抵抗
+                if ((foe.resist || 0) > 0) { foe.resist--; ev.push({ t: 'resist', who: 1 - idx }); continue; }
+                directDamage(foe, d.amt, ev, 1 - idx, '未来打击');
+                if (foe.hp <= 0) break;
+              }
               gainEnergy(pl, 2 + fm, ev, idx); pl.futureMark = fm + 1; ev.push({ t: 'status', who: idx, st: 'futureMark', amt: 1 }); ev.push({ t: 'text', msg: `未来打击命中 ${1 + fm} 段！获得「来自未来！」（${pl.futureMark} 层）` }); if (isMeditate(fsel)) { ev.push({ t: 'interrupt', who: 1 - idx }); fsel.broken = true; }
             } else { ev.push({ t: 'text', msg: '未来打击被防御挡下' }); }
           }
