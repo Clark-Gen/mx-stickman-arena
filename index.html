@@ -980,7 +980,7 @@ const PROF = {
     maxHp: 10, initEnergy: 1, maxEnergy: 5,
     trait: '被动「茁壮成长」：普通形态每 2 回合获得 1 点生命上限并回 1 点生命，扎根/巨树后每回合 +1；被攻击的回合改为按受到的伤害降低生命上限',
     skills: [
-      { name: '扎根', type: 'special', cost: 1, flavor: 'buff', desc: '获得「扎根」（禁用攻击/防御，被动效果翻倍；被攻击不打断冥想并降低生命上限）；再次使用取消' },
+      { name: '扎根', type: 'special', cost: 1, flavor: 'buff', desc: '获得「扎根」（禁用攻击/防御，被动效果翻倍；被攻击不打断冥想并降低生命上限）；再次使用取消，取消不消耗能量' },
       { name: '自然复苏', type: 'special', cost: 2, flavor: 'heal', desc: '提高自身 4 点生命上限，并让当前血量同步等于上限' },
       { name: '厚重树皮', type: 'special', cost: 3, flavor: 'buff', desc: '获得 2 层抵抗' },
       { name: '巨树重击', type: 'attack', cost: 4, flavor: 'heavy', desc: '每拥有 5 点生命上限，对敌方造成一次 2 点伤害' },
@@ -1352,6 +1352,7 @@ function computeCost(p, si) {
   const s = PROF[p.prof].skills[si];
   const n = s.name;
   if (n === '断尾求生' || n === '流') return 0;
+  if (n === '扎根' && p.rooted) return 0; // 退出扎根（取消）不消耗能量
   if (p.prof === 'alchemist' && ['调制', '燃烧瓶', '毒瓶', '治愈药水'].includes(n)) return 1;
   if (p.prof === 'priest' && n === '神罚' && p.prayer >= 8) return 3;
   return s.cost;
